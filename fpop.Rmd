@@ -1,0 +1,374 @@
+---
+title: "fpop"
+output: html_document
+---
+
+```{r}
+require(tidyverse)
+require(data.table)
+require(parallel)
+require(fANCOVA)
+require(e1071)
+set.seed(123L)
+num_cores <- detectCores()
+```
+
+## MS1 features clustering
+```{r}
+# reading features
+read_features <- function(file_name) {
+  tempdt <- fread(file_name)
+  prefix <- str_match(file_name, "(.*)\\.features\\.tsv$")[,2]
+  tempdt[,experiment := prefix]
+  tempdt
+}
+features_file_names <- list.files(".", "features.tsv")
+features <- rbindlist(mclapply(features_file_names, read_features, mc.cores = num_cores))
+exp_names <- features[,sort(unique(experiment))]
+features[,experiment := factor(experiment, levels = exp_names)]
+features[,.N]
+```
+
+```{r}
+# clustering
+features1 <- copy(features)
+
+# clustering by mass
+clum_tol <- 1 # ppm
+setorder(features1, experiment, mass)
+features1[,difm := abs(mass-shift(mass,fill=0)) / ((mass+shift(mass,fill=0))/2) * 1e6, by = experiment]
+features1[,spkm := if_else(difm < clum_tol, 0L, 1L)]
+features1[,clum := cumsum(spkm)]
+
+# clustering by rt
+clur_tol <- features1[,max(rtApex) - min(rtApex)] * 0.01 # 1% of rt scale
+counter <- 0
+while (counter < 1e3L) {
+  setorder(features1, experiment, clum, rtApex)
+  features1[,difr := abs(rtApex-shift(rtApex,fill=9999)), by = .(experiment, clum)]
+  i <- features1[difr < clur_tol,.I[which.min(difr)], by = .(experiment, clum)]$V1
+  if (length(i) == 0) {
+    break
+  }
+  features1[i-1,difr := NA]
+  
+  features1[,rtApex := if_else(condition = is.na(difr),
+                               true = (rtApex*intensitySum +shift(rtApex,type="lead")*shift(intensitySum,type="lead"))/(intensitySum+shift(intensitySum,type="lead")),
+                               false = rtApex)]
+  
+  features1[,intensitySum := if_else(condition = is.na(difr),
+                                     true = intensitySum + shift(intensitySum,type="lead"),
+                                     false = intensitySum)]
+  
+  features1 <- features1[-i]
+  counter <- counter+1
+}
+features1[,.N]
+```
+
+```{r}
+# clutering by mass between experiments
+features2 <- copy(features1)
+setorder(features2, mass)
+features2[,difm := abs(mass-shift(mass,fill=0)) / ((mass+shift(mass,fill=0))/2) * 1e6]
+features2[,spkm := if_else(difm < clum_tol, 0L, 1L)]
+features2[,clum := cumsum(spkm)]
+
+# clustering by rt between experiments
+setorder(features2, clum, rtApex)
+features2[,difr := abs(rtApex-shift(rtApex,fill=9999))]
+features2[,spkr := if_else(difr < clur_tol, 0L, 1L)]
+features2[,clur := cumsum(spkr)]
+```
+
+```{r}
+# modelling rt deviations
+num_runs <- length(unique(features[,experiment]))
+features3 <- features2[features2[,.I[.N == num_runs], by = .(clum, clur)]$V1]
+features3[,devrt := rtApex - median(rtApex), by = .(clum, clur)]
+
+loess_par <- function(name) {
+  data <- features3[experiment == name]
+  loess.as(x = data[,rtApex], y = data[,devrt],
+           degree = 2,
+           criterion = "aicc",
+           control = loess.control(surface = "direct"))
+}
+models <- mclapply(features3[,levels(experiment)],
+                   loess_par,
+                   mc.cores = num_cores)
+names(models) <- features3[,levels(experiment)]
+```
+
+```{r}
+# plotting model
+models1 <- data.table(x = models[[1]]$x, y = models[[1]]$y, yf = models[[1]]$fitted)
+
+ggplot(models1) +
+  geom_point(aes(x.x, y)) +
+  geom_line(aes(x.x,yf),col="red")
+```
+
+```{r}
+# adjusting rt
+features1 <- copy(features)
+features1[,devrt := predict(models[experiment][[1]], rtApex)]
+features1[,rtApex := rtApex - devrt]
+
+# clustering by mass
+clum_tol <- 1 # ppm
+setorder(features1, experiment, mass)
+features1[,difm := abs(mass-shift(mass,fill=0)) / ((mass+shift(mass,fill=0))/2) * 1e6, by = experiment]
+features1[,spkm := if_else(difm < clum_tol, 0L, 1L)]
+features1[,clum := cumsum(spkm)]
+
+# clustering by rt
+counter <- 0
+while (counter < 1e3L) {
+  setorder(features1, experiment, clum, rtApex)
+  features1[,difr := abs(rtApex-shift(rtApex,fill=9999)), by = .(experiment, clum)]
+  i <- features1[difr < clur_tol,.I[which.min(difr)], by = .(experiment, clum)]$V1
+  if (length(i) == 0) {
+    break
+  }
+  features1[i-1,difr := NA]
+  
+  features1[,rtApex := if_else(condition = is.na(difr),
+                               true = (rtApex*intensitySum +shift(rtApex,type="lead")*shift(intensitySum,type="lead"))/(intensitySum+shift(intensitySum,type="lead")),
+                               false = rtApex)]
+  
+  features1[,intensitySum := if_else(condition = is.na(difr),
+                                     true = intensitySum + shift(intensitySum,type="lead"),
+                                     false = intensitySum)]
+  
+  features1 <- features1[-i]
+  counter <- counter+1
+}
+
+# clutering by mass between experiments
+features2 <- copy(features1)
+setorder(features2, mass)
+features2[,difm := abs(mass-shift(mass,fill=0)) / ((mass+shift(mass,fill=0))/2) * 1e6]
+features2[,spkm := if_else(difm < clum_tol, 0L, 1L)]
+features2[,clum := cumsum(spkm)]
+
+# clustering by rt between experiments
+setorder(features2, clum, rtApex)
+features2[,difr := abs(rtApex-shift(rtApex,fill=9999))]
+features2[,spkr := if_else(difr < clur_tol, 0L, 1L)]
+features2[,clur := cumsum(spkr)]
+
+features2[,.N]
+```
+
+```{r}
+# averaging mass and rt within clusters
+features2[,`:=`(mass = mean(mass),
+                rtApex = median(rtApex)),
+          by = .(clum, clur)]
+features2[,uid := 1:.N]
+```
+
+## PSMs processing
+```{r}
+# reading psms
+psms_file_name <- list.files(path = ".", pattern = "[Pp][Ss][Mm]")
+psms <- fread(psms_file_name)
+psms[,.N]
+```
+
+```{r}
+# trimming psms table
+psms <- psms[,.(protein_id = `Master Protein Accessions`,
+                seq = Sequence,
+                mod = Modifications,
+                mz = `mz in Da`,
+                ch = Charge,
+                rt = `RT in min`,
+                intensity = Intensity,
+                experiment = str_match(`Spectrum File`, "(.*)\\.raw")[,2])]
+psms[,experiment := factor(experiment, levels = exp_names)]
+```
+
+```{r}
+# removing duplicated psms
+psms <- unique(psms)
+psms[,.N]
+```
+
+```{r}
+# calculating peptides mass
+proton_mass <- 1.00727646687992
+psms[,mass := mz * ch - proton_mass * ch]
+```
+
+```{r}
+# calculating oxidation states using mod column
+psms[,`:=`(oxi = if_else(str_detect(mod,"[Oo]xidation"),1L,0L),
+           oxi_m = str_count(mod,"Oxidation") * 1,
+           oxi_d = str_count(mod,"Dioxidation") * 2,
+           oxi_t = str_count(mod,"Trioxidation") * 3)]
+psms[,oxi_count := oxi_m + oxi_d + oxi_t]
+```
+
+```{r}
+# calculating rt shift based on previous model for MS1 features
+psms[,devrt := predict(models[experiment][[1]], rt)]
+psms[,rt := rt - devrt]
+```
+
+```{r}
+# clustering by rt
+counter <- 0
+while (counter < 1e4L) {
+  setorder(psms, experiment, seq, oxi_count, rt)
+  psms[,difr := abs(rt-shift(rt,fill=9999)), by = .(experiment, seq, oxi_count)]
+  i <- psms[difr < clur_tol,.I[which.min(difr)], by = .(experiment, seq, oxi_count)]$V1
+  if (length(i) == 0) {
+    break
+  }
+  psms[i-1,difr := NA]
+  
+  psms[,rtApex := if_else(condition = is.na(difr),
+                          true = (rt*intensity +shift(rt,type="lead")*shift(intensity,type="lead"))/(intensity+shift(intensity,type="lead")),
+                          false = rt)]
+  
+  psms[,intensity := if_else(condition = is.na(difr),
+                             true = intensity + shift(intensity,type="lead"),
+                             false = intensity)]
+  
+  psms <- psms[-i]
+  counter <- counter+1
+}
+psms[,.N]
+```
+
+```{r}
+# clustering by rt between experiments
+setorder(psms, seq, oxi_count, rt)
+psms[,difr := abs(rt-shift(rt,fill=9999))]
+psms[,spkr := if_else(difr < clur_tol, 0L, 1L)]
+psms[,clur := cumsum(spkr)]
+```
+
+```{r}
+# averaging mass and rt
+psms <- psms[,.(pmass = mean(mass),
+                prt = median(rt)),
+        by = .(protein_id, seq, oxi, oxi_count, clur)]
+psms[,.N]
+```
+
+## Mapping PSMs to MS1 features
+```{r}
+# copying psms and creating decoy table
+psms_target <- copy(psms)
+psms_decoy <- copy(psms)
+psms_decoy[,`:=`(pmass = sample(pmass),
+                 prt = sample(prt))]
+
+# mapping features to peptides
+map_mass_tol <- 10 # ppm
+# map_rt_tol <- 5 # min
+
+find_feature <- function(pmass, prt) {
+  found_features <- features2[abs(mass - pmass) / ((mass + pmass) / 2) * 1e6 < map_mass_tol]
+  # found_features <- found_features[abs(rtApex - prt) < rt_map_tol]
+  found_features[,`:=`(mass_err = abs(mass - pmass) / ((mass + pmass) / 2) * 1e6,
+                       rt_err = abs(rtApex - prt))]
+  found_features
+}
+
+psms_target[,feature := mcmapply(find_feature, pmass, prt, SIMPLIFY = F, mc.cores = num_cores)]
+peptides_target <- unnest(psms_target, feature)
+peptides_target <- peptides_target[peptides_target[,.I[which.min(rt_err)], by = uid]$V1]
+peptides_target[,match_type := "target"]
+
+psms_decoy[,feature := mcmapply(find_feature, pmass, prt, SIMPLIFY = F, mc.cores = num_cores)]
+peptides_decoy <- unnest(psms_decoy, feature)
+peptides_decoy <- peptides_decoy[peptides_decoy[,.I[which.min(rt_err)], by = uid]$V1]
+peptides_decoy[,match_type := "decoy"]
+```
+
+```{r}
+# separating target and decoy matches using SVM
+
+peptides_merged <- rbindlist(list(peptides_target, peptides_decoy))
+
+peptides_merged[,match_type := factor(match_type, levels = c("decoy","target"))]
+
+training_size <- if_else(peptides_merged[,.N] < 3e4L, peptides_merged[,.N], 3e4L)
+
+weight <- peptides_merged[match_type == "decoy", .N] / peptides_merged[, .N]
+
+peptides.svm <- svm(x = peptides_merged[,.(log(mass_err), log(rt_err))],
+                    y = peptides_merged[,match_type],
+                    class.weights = c("decoy" = 1, "target" = weight),
+                    subset = sample(x = peptides_merged[,.N], size = training_size, replace = FALSE))
+
+peptides_merged[,match_svm := predict(peptides.svm, peptides_merged[,.(log(mass_err), log(rt_err))])]
+
+peptides_filtered <- peptides_merged[match_type == "target" & match_svm == "target"]
+
+peptides_filtered[,.N]
+```
+
+```{r}
+# false discovery rate
+peptides_merged[match_type == "decoy" & match_svm == "target", .N] / peptides_merged[match_svm == "target", .N] * 100
+```
+
+```{r}
+# max errors
+peptides_filtered[,.(max(mass_err), max(rt_err))]
+```
+
+```{r}
+ggplot() +
+  geom_point(data = peptides_merged, mapping = aes(x = log(rt_err), y = log(mass_err), col = match_type), size = 1.5, alpha = 0.1, stroke = 0) +
+  labs(x = "Log RT error", y = "Log mass error") +
+  theme(legend.position = "None") +
+  geom_point(data = peptides_filtered, mapping = aes(x = log(rt_err), y = log(mass_err)), size = 1.5, alpha = 0.1, stroke = 0.1, shape = 1)
+
+# ggsave(filename = "mapping_2.pdf", width = 4, height = 4, dpi = 150)
+```
+
+## Analysis
+```{r}
+source("uniprot_fasta.R")
+fasta <- parse_uniprot_fasta("ecoli_mg1655_uniprot_181223.fasta")
+```
+
+```{r}
+peptides <- peptides_filtered %>%
+  select(protein_id, seq, oxi, oxi_count, experiment, intensitySum) %>%
+  left_join(fasta %>% select(protein_id, protein, gene, protein_sequence)) %>%
+  mutate(start = str_locate(protein_sequence, seq)[,1],
+         end = str_locate(protein_sequence, seq)[,2],
+         pos = paste(start, end, sep = "-")) %>%
+  select(protein_id, protein, gene, seq, pos, oxi, oxi_count, experiment, intensitySum) %>%
+  group_by(protein_id, protein, gene, seq, pos, experiment) %>%
+  summarise(fraction = sum(intensitySum * oxi) / sum(intensitySum)) %>%
+  spread(key = experiment, value = fraction)
+```
+
+```{r}
+peptides %>%
+  gather(key = experiment, value = fraction,
+         -protein_id, -protein, -gene, -seq, -pos, na.rm = T) %>%
+  extract(col = experiment, into = c("sample","replicate"), regex = "rnap\\_(.*?)\\_([123])") %>%
+  spread(key = sample, value = fraction) %>%
+  group_by(protein_id, protein, gene, seq, pos) %>%
+  filter(length(unique(core)) == 3,
+         length(unique(rpod)) == 3) %>%
+  filter(str_detect(gene, "rpo[ABCZ]")) %>%
+  summarise(fold = mean(core) / mean(rpod),
+            pval = t.test(core, rpod, alternative = "greater")$p.value) %>%
+  arrange(-fold) %>%
+  filter(pval < 0.05, gene == "rpoB") %>% View()
+  
+  # ungroup() %>%
+  # select(pos) %>%
+  # unlist() %>%
+  # str_c(collapse = "+")
+```
