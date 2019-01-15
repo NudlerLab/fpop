@@ -39,31 +39,55 @@ setorder(features1, experiment, mass)
 features1[,difm := abs(mass-shift(mass,fill=0)) / ((mass+shift(mass,fill=0))/2) * 1e6, by = experiment]
 features1[,spkm := if_else(difm < clum_tol, 0L, 1L)]
 features1[,clum := cumsum(spkm)]
+```
 
+```{r}
 # clustering by rt
-clur_tol <- features1[,max(rtApex) - min(rtApex)] * 0.01 # 1% of rt scale
-counter <- 0
-while (counter < 1e3L) {
-  setorder(features1, experiment, clum, rtApex)
-  features1[,difr := abs(rtApex-shift(rtApex,fill=9999)), by = .(experiment, clum)]
-  i <- features1[difr < clur_tol,.I[which.min(difr)], by = .(experiment, clum)]$V1
-  if (length(i) == 0) {
-    break
-  }
-  features1[i-1,difr := NA]
-  
-  features1[,rtApex := if_else(condition = is.na(difr),
-                               true = (rtApex*intensitySum +shift(rtApex,type="lead")*shift(intensitySum,type="lead"))/(intensitySum+shift(intensitySum,type="lead")),
-                               false = rtApex)]
-  
-  features1[,intensitySum := if_else(condition = is.na(difr),
-                                     true = intensitySum + shift(intensitySum,type="lead"),
-                                     false = intensitySum)]
-  
-  features1 <- features1[-i]
-  counter <- counter+1
+# clur_tol <- features1[,max(rtApex) - min(rtApex)] * 0.01 # 1% of rt scale
+# counter <- 0
+# while (counter < 1e3L) {
+#   setorder(features1, experiment, clum, rtApex)
+#   features1[,difr := abs(rtApex-shift(rtApex,fill=9999)), by = .(experiment, clum)]
+#   i <- features1[difr < clur_tol,.I[which.min(difr)], by = .(experiment, clum)]$V1
+#   if (length(i) == 0) {
+#     break
+#   }
+#   features1[i-1,difr := NA]
+#   
+#   features1[,rtApex := if_else(condition = is.na(difr),
+#                                true = (rtApex*intensitySum +shift(rtApex,type="lead")*shift(intensitySum,type="lead"))/(intensitySum+shift(intensitySum,type="lead")),
+#                                false = rtApex)]
+#   
+#   features1[,intensitySum := if_else(condition = is.na(difr),
+#                                      true = intensitySum + shift(intensitySum,type="lead"),
+#                                      false = intensitySum)]
+#   
+#   features1 <- features1[-i]
+#   counter <- counter+1
+# }
+# features1[,.N]
+```
+
+
+```{r}
+# clustering by rt
+clur_tol <- 1 # min
+setorder(features1, experiment, clum, rtApex)
+features1[,difr := abs(rtApex-shift(rtApex,fill=9999)), by=.(experiment, clum)]
+features1[,spkr := if_else(difr < clur_tol, 0L, 1L)]
+features1[,clur := cumsum(spkr)]
+```
+
+```{r}
+# averaging mass and rt withing clusters
+peak_intensity <- function(rt, intensity) {
+  intensity[is.na(intensity) | near(0,intensity)] <- .Machine$double.xmin
+  rt[which.max(intensity)]
 }
-features1[,.N]
+features1 <- features1[,.(mass = mean(mass),
+                          rtApex = peak_intensity(rtApex, intensitySum),
+                          intensitySum = sum(intensitySum)),
+                       by = .(experiment, clum, clur)]
 ```
 
 ```{r}
@@ -101,7 +125,7 @@ names(models) <- features3[,levels(experiment)]
 ```
 
 ```{r}
-# plotting model
+# plotting one of the models
 models1 <- data.table(x = models[[1]]$x, y = models[[1]]$y, yf = models[[1]]$fitted)
 
 ggplot(models1) +
@@ -116,34 +140,43 @@ features1[,devrt := predict(models[experiment][[1]], rtApex)]
 features1[,rtApex := rtApex - devrt]
 
 # clustering by mass
-clum_tol <- 1 # ppm
 setorder(features1, experiment, mass)
 features1[,difm := abs(mass-shift(mass,fill=0)) / ((mass+shift(mass,fill=0))/2) * 1e6, by = experiment]
 features1[,spkm := if_else(difm < clum_tol, 0L, 1L)]
 features1[,clum := cumsum(spkm)]
 
+setorder(features1, experiment, clum, rtApex)
+features1[,difr := abs(rtApex-shift(rtApex,fill=9999)), by=.(experiment, clum)]
+features1[,spkr := if_else(difr < clur_tol, 0L, 1L)]
+features1[,clur := cumsum(spkr)]
+
+# averaging mass and rt withing clusters
+features1 <- features1[,.(mass = mean(mass),
+                          rtApex = peak_intensity(rtApex, intensitySum),
+                          intensitySum = sum(intensitySum)),
+                       by = .(experiment, clum, clur)]
 # clustering by rt
-counter <- 0
-while (counter < 1e3L) {
-  setorder(features1, experiment, clum, rtApex)
-  features1[,difr := abs(rtApex-shift(rtApex,fill=9999)), by = .(experiment, clum)]
-  i <- features1[difr < clur_tol,.I[which.min(difr)], by = .(experiment, clum)]$V1
-  if (length(i) == 0) {
-    break
-  }
-  features1[i-1,difr := NA]
-  
-  features1[,rtApex := if_else(condition = is.na(difr),
-                               true = (rtApex*intensitySum +shift(rtApex,type="lead")*shift(intensitySum,type="lead"))/(intensitySum+shift(intensitySum,type="lead")),
-                               false = rtApex)]
-  
-  features1[,intensitySum := if_else(condition = is.na(difr),
-                                     true = intensitySum + shift(intensitySum,type="lead"),
-                                     false = intensitySum)]
-  
-  features1 <- features1[-i]
-  counter <- counter+1
-}
+# counter <- 0
+# while (counter < 1e3L) {
+#   setorder(features1, experiment, clum, rtApex)
+#   features1[,difr := abs(rtApex-shift(rtApex,fill=9999)), by = .(experiment, clum)]
+#   i <- features1[difr < clur_tol,.I[which.min(difr)], by = .(experiment, clum)]$V1
+#   if (length(i) == 0) {
+#     break
+#   }
+#   features1[i-1,difr := NA]
+#   
+#   features1[,rtApex := if_else(condition = is.na(difr),
+#                                true = (rtApex*intensitySum +shift(rtApex,type="lead")*shift(intensitySum,type="lead"))/(intensitySum+shift(intensitySum,type="lead")),
+#                                false = rtApex)]
+#   
+#   features1[,intensitySum := if_else(condition = is.na(difr),
+#                                      true = intensitySum + shift(intensitySum,type="lead"),
+#                                      false = intensitySum)]
+#   
+#   features1 <- features1[-i]
+#   counter <- counter+1
+# }
 
 # clutering by mass between experiments
 features2 <- copy(features1)
@@ -191,7 +224,7 @@ psms[,experiment := factor(experiment, levels = exp_names)]
 ```
 
 ```{r}
-# removing duplicated psms
+# removing duplicates
 psms <- unique(psms)
 psms[,.N]
 ```
@@ -218,28 +251,36 @@ psms[,rt := rt - devrt]
 ```
 
 ```{r}
-# clustering by rt
-counter <- 0
-while (counter < 1e4L) {
-  setorder(psms, experiment, seq, oxi_count, rt)
-  psms[,difr := abs(rt-shift(rt,fill=9999)), by = .(experiment, seq, oxi_count)]
-  i <- psms[difr < clur_tol,.I[which.min(difr)], by = .(experiment, seq, oxi_count)]$V1
-  if (length(i) == 0) {
-    break
-  }
-  psms[i-1,difr := NA]
-  
-  psms[,rtApex := if_else(condition = is.na(difr),
-                          true = (rt*intensity +shift(rt,type="lead")*shift(intensity,type="lead"))/(intensity+shift(intensity,type="lead")),
-                          false = rt)]
-  
-  psms[,intensity := if_else(condition = is.na(difr),
-                             true = intensity + shift(intensity,type="lead"),
-                             false = intensity)]
-  
-  psms <- psms[-i]
-  counter <- counter+1
-}
+# clustering by rt within each experiment
+# counter <- 0
+# while (counter < 1e4L) {
+#   setorder(psms, experiment, seq, oxi_count, rt)
+#   psms[,difr := abs(rt-shift(rt,fill=9999)), by = .(experiment, seq, oxi_count)]
+#   i <- psms[difr < clur_tol,.I[which.min(difr)], by = .(experiment, seq, oxi_count)]$V1
+#   if (length(i) == 0) {
+#     break
+#   }
+#   psms[i-1,difr := NA]
+#   
+#   psms[,rtApex := if_else(condition = is.na(difr),
+#                           true = (rt*intensity +shift(rt,type="lead")*shift(intensity,type="lead"))/(intensity+shift(intensity,type="lead")),
+#                           false = rt)]
+#   
+#   psms[,intensity := if_else(condition = is.na(difr),
+#                              true = intensity + shift(intensity,type="lead"),
+#                              false = intensity)]
+#   
+#   psms <- psms[-i]
+#   counter <- counter+1
+# }
+
+setorder(psms, experiment, seq, oxi_count, rt)
+psms[,difr := abs(rt-shift(rt,fill=9999)), by = .(experiment, seq, oxi_count)]
+psms[,spkr := if_else(difr < clur_tol, 0L, 1L)]
+psms[,clur := cumsum(spkr)]
+psms <- psms[,.(mass = mean(mass),
+                rt = peak_intensity(rt, intensity)),
+             by = .(protein_id, seq, oxi, oxi_count, experiment, clur)]
 psms[,.N]
 ```
 
@@ -273,7 +314,7 @@ map_mass_tol <- 10 # ppm
 
 find_feature <- function(pmass, prt) {
   found_features <- features2[abs(mass - pmass) / ((mass + pmass) / 2) * 1e6 < map_mass_tol]
-  # found_features <- found_features[abs(rtApex - prt) < rt_map_tol]
+  # found_features <- found_features[abs(rtApex - prt) < map_rt_tol]
   found_features[,`:=`(mass_err = abs(mass - pmass) / ((mass + pmass) / 2) * 1e6,
                        rt_err = abs(rtApex - prt))]
   found_features
@@ -292,7 +333,6 @@ peptides_decoy[,match_type := "decoy"]
 
 ```{r}
 # separating target and decoy matches using SVM
-
 peptides_merged <- rbindlist(list(peptides_target, peptides_decoy))
 
 peptides_merged[,match_type := factor(match_type, levels = c("decoy","target"))]
@@ -365,10 +405,9 @@ peptides %>%
   summarise(fold = mean(core) / mean(rpod),
             pval = t.test(core, rpod, alternative = "greater")$p.value) %>%
   arrange(-fold) %>%
-  filter(pval < 0.05, gene == "rpoB") %>% View()
-  
-  # ungroup() %>%
-  # select(pos) %>%
-  # unlist() %>%
-  # str_c(collapse = "+")
+  filter(pval < 0.05, gene == "rpoA") %>%
+  ungroup() %>%
+  select(pos) %>%
+  unlist() %>%
+  str_c(collapse = "+")
 ```
